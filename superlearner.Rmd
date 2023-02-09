@@ -1,0 +1,1085 @@
+---
+title: "Novel machine learning approaches to the non-invasive diagnosis of liver fibrosis in NAFLD"
+output: html_document
+author: "Vivek Charu, Jane W. Liang, Ajitha Mannalithara, Allison Kwong, and W. Ray Kim"
+date: "2023-01-05"
+---
+
+```{r setup, include=FALSE}
+# Suppress messages
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+```{r}
+# Load libraries
+library(tidyverse)
+library(gridExtra)
+library(gtable)
+library(reshape2)
+library(forcats)
+library(cowplot)
+
+library(SuperLearner)
+
+library(cvAUC)
+library(pROC)
+
+library(survey)
+library(DescTools)
+library(WeightedROC)
+```
+
+# Data processing
+
+We read in the training data (NASH-CRN) and two validation sets (FLINT and NHANES). 
+
+```{r}
+# Data directory
+dir = "/Users/jliang/Library/CloudStorage/Box-Box/Jane-Vivek/Superlearner/Data/"
+
+# NASH-CRN
+nash = read.csv(paste0(dir, "NASH_CRN/NASH.CRN.table3.csv"))
+# FLINT
+flint = read.csv(paste0(dir, "FLINT/FLINT_Tbls_1and2.csv"))
+# NHANES
+nhanes = read.csv(paste0(dir, "NHANES_V2/Nhanes_2017_20_ExamData_SAFE_V2.csv"))
+```
+
+The names of the NASH-CRN variables that will be used to fit the superlearner models are defined as follows. We also name the outcome variable and distinguish between continuous variables (which can be log transformed) and binary variables (which will not be log transformed). 
+
+```{r}
+# Predictors to use for model specification
+pred_vars = c("AST", "ALT", "ALKA", "BILIT", "GGT", "GLUC", "ALB", "HEMA", 
+              "WBC", "PLAT", "CHOL", "TRI", "HDL", "LDL", "HBA1C", "AGE", 
+              "MALE", "HISPANIC", "WHITE", "BMI", "DIAB2", "HTN", "GLOB")
+
+# Continuous predictors to log transform
+pred_vars_log = c("AST", "ALT", "ALKA", "BILIT", "GGT", "GLUC", "ALB", "HEMA", 
+                  "WBC", "PLAT", "CHOL", "TRI", "HDL", "LDL", "HBA1C", "AGE", 
+                  "BMI", "GLOB")
+# Binary/categorical predictors that will not be transformed
+pred_vars_binary = c("MALE", "HISPANIC", "WHITE", "DIAB2", "HTN")
+
+# Outcome variable
+response = "sigfibro"
+```
+
+We format the FLINT variables to match the names and units in the NASH-CRN data. 
+
+```{r}
+flint$GLUC = flint$GLUCB
+flint$PLAT = flint$PLATELET/1000
+flint$TRI = flint$TRIG
+flint$HISPANIC = flint$HISP
+flint$WHITE = ifelse(flint$RACE == "White", 1, 0)
+flint$DIAB2 = flint$DIABRX 
+flint$GLOB = flint$PROT - flint$ALB 
+```
+
+We format the NHANES variables to match the names and units in the NASH-CRN data. 
+
+```{r}
+nhanes$AST = nhanes$LBXSASSI
+nhanes$ALT = nhanes$LBXSATSI
+nhanes$ALKA = nhanes$LBXSAPSI
+nhanes$BILIT = nhanes$LBDSTBSI/17.1
+nhanes$GGT = nhanes$LBXSGTSI
+nhanes$GLUC = nhanes$LBXGLU 
+nhanes$ALB = nhanes$LBDSALSI/10 
+nhanes$HEMA = nhanes$LBXHCT 
+nhanes$WBC = nhanes$LBXWBCSI 
+nhanes$PLAT = nhanes$LBXPLTSI  
+nhanes$CHOL = nhanes$LBXTC 
+nhanes$TRI = nhanes$LBXTR  
+nhanes$HDL = nhanes$LBDHDD 
+nhanes$LDL = nhanes$LBDLDL 
+nhanes$HBA1C = nhanes$LBXGH 
+nhanes$AGE = nhanes$RIDAGEYR
+nhanes$MALE = ifelse(nhanes$RIAGENDR == 1, 1, 0) 
+nhanes$HISPANIC = ifelse(nhanes$RIDRETH3 %in% c(1, 2), 1, 0) 
+nhanes$WHITE = ifelse(nhanes$RIDRETH3 == 3, 1, 0)
+nhanes$BMI = nhanes$BMXBMI
+nhanes$DIAB2 = nhanes$Diabetes
+nhanes$DIAB2[is.na(nhanes$DIAB2)] = 0
+nhanes$HTN = ifelse(nhanes$BPQ020 == 1 | nhanes$BPQ030 == 1 | 
+                      nhanes$BPD035 <= 80 | nhanes$BPQ040A == 1 | 
+                      nhanes$BPQ050A  == 1 | nhanes$BPXOSY1 > 140 | 
+                      nhanes$BPXOSY2 > 140 | nhanes$BPXOSY3 > 140 | 
+                      nhanes$BPXODI1 > 90 |  nhanes$BPXODI2 > 90 | 
+                      nhanes$BPXODI3 > 90, 1, 0)
+nhanes$HTN[is.na(nhanes$HTN)] = 0
+nhanes$GLOB = nhanes$LBXSGB
+nhanes$LSM = nhanes$LUXSMED
+nhanes$CAP = nhanes$LUXCAPM
+```
+
+For each dataset, we can define a BMI variable that sets values above 40 to 40. The `BMI40` variable will be used to calculate the SAFE score. 
+
+```{r}
+# NASH-CRN
+nash$BMI40 = nash$BMI
+nash$BMI40[nash$BMI40 > 40] = 40
+
+# FLINT
+flint$BMI40 = flint$BMI
+flint$BMI40[flint$BMI40 > 40] = 40
+
+# NHANES
+nhanes$BMI40 = nhanes$BMI
+nhanes$BMI40[nhanes$BMI40 > 40] = 40
+```
+
+We specify the response variable (significant fibrosis) for each dataset. For NHANES, this can be defined as those with liver stiffness measure (LSM) above 8 kPa. 
+
+```{r}
+nash$sigfibro = ifelse(nash$NFIBRO >= 2 , 1, 0)
+flint$sigfibro = ifelse(flint$BLFIBRO >= 2, 1, 0)
+nhanes$sigfibro = ifelse(nhanes$LSM > 8, 1, 0)
+```
+
+We now drop observations with missing values. This results in a reduction of 693 to 648 observations for NASH-CRN and 283 to 270 for FLINT. 
+
+```{r}
+# Subset relevant predictors and drop observations with missing values
+# NASH-CRN
+nash = na.omit(nash[,c(pred_vars, response, "BMI40")])
+# FLINT
+flint = na.omit(flint[,c(pred_vars, response, "BMI40")])
+```
+
+The NHANES data was collected using a clustered survey sampling approach. This means that point estimates need to take into account the sampling weights, and standard errors need to take into account the clusters and strata. After dropping ineligible NHANES participants using the `Elig_NAFLD` variable, 2636 out 14300 observations remain. Dropping observations with missing values further reduces the sample size to 1279. Dropping observations with zero sampling weights results in 1244 observations in the final NHANES-NAFLD dataset. 
+
+```{r}
+# NHANES-NAFLD
+# Drop ineligible values
+nhanes = nhanes %>% subset(Elig_NAFLD == 1)
+# Drop observations with missing values
+nhanes = na.omit(nhanes[, unique(c(pred_vars, response, 
+                                   "BMI40", "LSM", "CAP", 
+                                   "WTSAFPRP", "SDMVPSU", "SDMVSTRA"))])
+# Drop people with zero weights
+nhanes = nhanes[nhanes$WTSAFPRP!=0,]
+```
+
+Some of the superlearners will use log-transformed predictors, so we create log-transformed versions of all continuous variables. One value in the NASH-CRN is infinite, so we replaced it with the mean. 
+
+```{r}
+# Log variables
+for (var in pred_vars_log) {
+  nash[,paste0("LN_", var)] = log(nash[,var])
+  flint[,paste0("LN_", var)] = log(flint[,var])
+  nhanes[,paste0("LN_", var)] = log(nhanes[,var])
+}
+# Fix an ALKA value which is zero 
+nash$LN_ALKA[which(nash$LN_ALKA<(-1000))] = log(mean(nash$ALKA))
+```
+
+We define the covariate matrices and response vectors for each dataset. For the NHANES-NAFLD data, we also define the sampling weights, cluster IDs, and strata to use for the complex survey design. 
+
+```{r}
+# NASH-CRN
+nashX = nash[,pred_vars]
+nashX_log = nash[,c(pred_vars_binary, paste0("LN_", pred_vars_log))]
+nashX_all = cbind(nashX, nashX_log[,paste0("LN_", pred_vars_log)])
+nashY = nash[,response]
+
+# FLINT
+flintX = flint[,pred_vars]
+flintX_log = flint[,c(pred_vars_binary, paste0("LN_", pred_vars_log))]
+flintX_all = cbind(flintX, flintX_log[,paste0("LN_", pred_vars_log)])
+flintY = flint[,response]
+
+# NHANES-NAFLD
+nhanesX = nhanes[,pred_vars]
+nhanesX_log = nhanes[,c(pred_vars_binary, paste0("LN_", pred_vars_log))]
+nhanesX_all = cbind(nhanesX, nhanesX_log[,paste0("LN_", pred_vars_log)])
+nhanesY = nhanes[,response]
+# Complex survey information and design
+nhanes_weights = nhanes$WTSAFPRP
+nhanes_clusters = nhanes$SDMVPSU
+nhanes_strata = nhanes$SDMVSTRA
+nhanes_design = svydesign(id = ~nhanes_clusters, 
+                          strata = ~nhanes_strata, 
+                          weights = ~nhanes_weights, nest=TRUE)
+```
+
+# Descriptive statistics
+
+We create a "Table 1" that reports the median and IQR for continuous variables and the mean and standard deviation for binary variables in each of the three datasets. Note that the descriptive statistics for NHANES-NAFLD are weighted by the sampling weights, and the standard deviations also incorporate information from the survey clusters and strata. 
+
+```{r}
+# Data dictionary for nice variable names
+dat_dict = data.frame(rbind(
+  c("ALB", "Albumin (g/dL)"), 
+  c("ALT", "Alanine aminotransferase (U/L)"), 
+  c("ALKA", "Alkaline phosphatase (U/L)"), 
+  c("AST", "Aspartate aminotransferase (U/L)"), 
+  c("BMI", "Body mass index (kg/m2)"), 
+  c("GGT", "Gamma-glutamyl transferase (U/L)"), 
+  c("GLOB", "Globulin (g/dL)"), 
+  c("GLUC", "Glucose (mg/dL)"), 
+  c("HDL", "HDL cholesterol (mg/dL)"), 
+  c("HEMA", "Hematocrit (%)"), 
+  c("HBA1C", "Hemoglobin A1C (%)"), 
+  c("HTN", "Hypertension (yes/no)"), 
+  c("LDL", "LDL cholesterol (mg/dL)"), 
+  c("PLAT", "Platelets (1000/mm3)"), 
+  c("BILIT", "Total bilirubin (mg/dL)"), 
+  c("CHOL", "Total cholesterol (mg/dL)"), 
+  c("TRI", "Triglyercides (mg/dL)"), 
+  c("DIAB2", "Type 2 diabetes (yes/no)"), 
+  c("WBC", "White blood cell (1000/mm3)"), 
+  c("AGE", "Age (years)"), 
+  c("HISPANIC", "Hispanic ethnicity (yes/no)"), 
+  c("MALE", "Male gender (yes/no)"), 
+  c("WHITE", "White race (yes/no)"), 
+  c("sigfibro", "Significant fibrosis (yes/no)")
+))
+names(dat_dict) = c("short", "long")
+
+# Center (median or mean) of each variable
+center_tab = t(sapply(c(response, sort(pred_vars)), function(var) {
+  if (var %in% intersect(dat_dict$short, pred_vars_log)) { # Continuous
+    c(median(nashX[,var]), median(flintX[,var]), 
+      Median(nhanesX[,var], weights = nhanes_weights))
+  } else { # Binary variables
+    if (var == response) { # Special case for response variable
+      c(mean(nashY), mean(flintY), 
+        weighted.mean(nhanesY, nhanes_weights))
+    } else { 
+    c(mean(nashX[,var]), mean(flintX[,var]), 
+      weighted.mean(nhanesX[,var], nhanes_weights))
+    }
+  }
+}))
+colnames(center_tab) = c("NASH-CRN", "FLINT", "NHANES-NAFLD")
+
+# Spread (IQR or standard deviation) of each variable
+spread_tab = t(sapply(c(response, sort(pred_vars)), function(var) {
+  if (var %in% intersect(dat_dict$short, pred_vars_log)) { # Continuous variables
+    c(IQR(nashX[,var]), IQR(flintX[,var]), 
+      IQRw(nhanesX[,var], weights = nhanes_weights))
+  } else { # Binary variables
+    if (var == response) { # Special case for response variablee
+      c(sd(nashY), sd(flintY), 
+        sqrt(svyvar(nhanesY, nhanes_design)))
+    } else {
+    c(sd(nashX[,var]), sd(flintX[,var]), 
+      sqrt(svyvar(nhanesX[,var], nhanes_design)))
+    }
+  }
+})) 
+colnames(spread_tab) = c("NASH-CRN", "FLINT", "NHANES-NAFLD")
+
+# Create Table 1
+tab1 = matrix(paste0(round(center_tab, 2), " (", round(spread_tab, 2), ")"), 
+              nrow = nrow(center_tab), ncol = ncol(center_tab))
+rownames(tab1) = rownames(center_tab)
+colnames(tab1) = colnames(center_tab)
+
+# Use more descriptive variable names
+tab1 = merge(dat_dict, tab1, by.x = "short", by.y = 0, sort = FALSE)
+rownames(tab1) = tab1$long
+tab1$short = NULL; tab1$long = NULL
+write.csv(tab1, file = "tab1.csv")
+knitr::kable(tab1)
+```
+
+# Train superlearners
+
+We fit superlearners with 12 different base models to all untransformed predictors; all log-transformed predictors; and both untransformed and log-transformed predictors in the NASH-CRN dataset. Default tuning parameters were used for all 12 base models. 
+
+```{r, eval = FALSE}
+# Library of 12 base models
+SL_library = c("SL.bayesglm", # Bayesian generalized linear model
+               "SL.earth", # Multivariate adaptive regression splines
+               "SL.gam", # Generalized additive model
+               "SL.gbm", # Generalized boosted model
+               "SL.glm", # Generalized linear model
+               "SL.glmnet", # Regularized generalized linear model
+               "SL.ipredbagg", # Bagging trees
+               "SL.nnet", # Neural network
+               "SL.polymars", # Multivariate adaptive polynomial spline regression
+               "SL.randomForest", # Random forest
+               "SL.rpart", # Recursive partitioning tree
+               "SL.svm") # Support vector machine
+
+# Untransformed predictors
+set.seed(1)
+SL = SuperLearner(Y = nashY, X = nashX, family = binomial(), 
+                  SL.library = SL_library, method = "method.AUC")
+
+# Log-transformed predictors
+set.seed(1)
+SL_log = SuperLearner(Y = nashY, X = nashX_log, family = binomial(), 
+                      SL.library = SL_library,  method = "method.AUC")
+
+# Untransformed and log-transformed predictors
+set.seed(1)
+SL_all = SuperLearner(Y = nashY, X = nashX_all, family = binomial(), 
+                      SL.library = SL_library,  method = "method.AUC")
+
+save(SL, SL_log, SL_all, file = "SL.rData")
+```
+
+We then fit superlearners with 90 different combinations of base models and tuning parameters to the same 3 combinations of predictors as above. 
+
+```{r, eval = FALSE}
+# Multivariate adaptive regression spline models (3)
+earth_learners = 
+  create.Learner("SL.earth", 
+                 tune = list(degree = c(1, 2, 3)))
+
+# Generalized boosted models (27)
+gbm_learners = 
+  create.Learner("SL.gbm", 
+                 tune = list(interaction.depth = c(1, 2, 3), 
+                             shrinkage = c(0.1, 0.01, 0.001), 
+                             n.minobsinnode = c(1, 10, 20)))
+
+# Regularized generalized linear models (3)
+glmnet_learners = 
+  create.Learner("SL.glmnet", 
+                 tune = list(alpha = c(0, 0.5, 1)))
+
+# Bagging trees (9)
+ipredbagg_learners = 
+  create.Learner("SL.ipredbagg", 
+                 tune = list(minsplit = c(10, 20, 30), 
+                             cp = c(0.005, 0.01, 0.05)))
+
+# Neural networks (9)
+nnet_learners = 
+  create.Learner("SL.nnet", 
+                 tune = list(size = c(2, 5, 10), 
+                             decay = c(0, 0.25, 0.5)))
+
+# Multivariate adaptive polynomial spline regression models (9)
+polymars_learners = 
+  create.Learner("SL.polymars", 
+                 tune = list(gcv = c(2, 4, 6), 
+                             knot.space = c(2, 3, 4)))
+
+# Random forests (9)
+randomForest_learners = 
+  create.Learner("SL.randomForest", 
+                 tune = list(mtry = floor(sqrt(ncol(nashX)) * c(0.5, 1, 2)), 
+                             nodesize = c(10, 20, 50)))
+
+# Recursive partitioning trees (9)
+rpart_learners = 
+  create.Learner("SL.rpart", 
+                 tune = list(minsplit = c(10, 20, 30), 
+                             cp = c(0.005, 0.01, 0.05)))
+
+# Support vector machines (9)
+svm_learners = 
+  create.Learner("SL.svm", 
+                 tune = list(gamma = (1/ncol(nashX)) * c(0.5, 1, 2), 
+                             cost = c(0.5, 1, 1.5)))
+
+# Library of 90 base models with varying tuning parameters
+big_SL_library = c(
+  "SL.bayesglm", # Bayesian generalized linear model (1)
+  earth_learners$names, # Multivariate adaptive regression spline models (3)
+  "SL.gam", # Generalized additive model (1)
+  gbm_learners$names, # Generalized boosted models (27)
+  "SL.glm", # Generalized linear model (1)
+  glmnet_learners$names, # Regularized generalized linear models (3)
+  ipredbagg_learners$names, # Bagging trees (9)
+  nnet_learners$names, # Neural networks (9)
+  polymars_learners$names, # Multivariate adaptive polynomial spline regression models (9)
+  randomForest_learners$names, # Random forest models (9)
+  rpart_learners$names, # Recursive partitioning trees (9)
+  svm_learners$names) # Support vector machines (9)
+
+# Untransformed predictors
+set.seed(1)
+big_SL = SuperLearner(Y = nashY, X = nashX, family = binomial(), 
+                      SL.library = big_SL_library, method = "method.AUC")
+
+# Log-transformed predictors
+set.seed(1)
+big_SL_log = SuperLearner(Y = nashY, X = nashX_log, family = binomial(), 
+                          SL.library = big_SL_library,  method = "method.AUC")
+
+# Untransformed and log-transformed predictors
+set.seed(1)
+big_SL_all = SuperLearner(Y = nashY, X = nashX_all, family = binomial(), 
+                          SL.library = big_SL_library,  method = "method.AUC")
+
+save(big_SL, big_SL_log, big_SL_all, file = "big_SL.rData")
+```
+
+```{r, echo = FALSE}
+load("SL.rData")
+load("big_SL.rData")
+```
+
+We summarize the base model coefficients/weights for each superlearner. For brevity, we summed up all weights corresponding to the same model (but with different parameters) in the superlearners with 90 base models. 
+
+```{r}
+# Dictionary for nice names of superlearner base algorithms
+sl_dict = data.frame(rbind(
+  c("bayesglm", "Bayesian generalized linear model"), 
+  c("earth", "Multivariate adaptive regression splines"), 
+  c("gam", "Generalized additive model"), 
+  c("gbm", "Generalized boosted model"), 
+  c("glm", "Generalized linear model"), 
+  c("glmnet", "Regularized generalized linear model"), 
+  c("ipredbagg", "Bagging trees"), 
+  c("nnet", "Neural network"), 
+  c("polymars", "Multivariate adaptive polynomial spline regression"), 
+  c("randomForest", "Random forest"), 
+  c("rpart", "Recursive partitioning tree"), 
+  c("svm", "Support vector machine")
+))
+names(sl_dict) = c("short", "long")
+
+# Coefficients for superlearner with 12 base algorithms
+coef_SL = cbind("SL-12" = SL$coef, 
+                "SL-12 (log)" = SL_log$coef, 
+                "SL-12 (all)" = SL_all$coef)
+rownames(coef_SL) = sub("_All", "", sub("SL.", "", rownames(coef_SL)))
+
+# Coefficients for superlearner with 90 base algorithms
+coef_big_SL = cbind("SL-90" = big_SL$coef, 
+                    "SL-90 (log)" = big_SL_log$coef, 
+                    "SL-90 (all)" = big_SL_all$coef)
+rownames(coef_big_SL) = sub("_.*", "", sub("SL.", "", rownames(coef_big_SL)))
+# Combine (sum) weights from same base model type
+coef_big_SL = aggregate(coef_big_SL, list(rownames(coef_big_SL)), sum)
+
+# Put all superlearner coefficients together
+coef_SL_tab = merge(coef_SL, coef_big_SL, by.x = 0, by.y = "Group.1")
+rownames(coef_SL_tab) = coef_SL_tab$Row.names
+coef_SL_tab = coef_SL_tab[,-1]
+knitr::kable(round(coef_SL_tab, 3))
+```
+
+```{r}
+# Use more descriptive model names
+coef_SL_tab = merge(sl_dict, coef_SL_tab, by.x = "short", by.y = 0, sort = FALSE)
+rownames(coef_SL_tab) = paste(coef_SL_tab$short, coef_SL_tab$long)
+coef_SL_tab$short = NULL; coef_SL_tab$long = NULL
+
+write.csv(round(coef_SL_tab, 3), file = "coef_SL_tab.csv")
+```
+
+# Validate superlearners
+
+We predict the scores for each superlearner model and test dataset. 
+
+```{r}
+# FLINT
+flint_preds = predict(SL, flintX)
+flint_log_preds = predict(SL_log, flintX_log)
+flint_all_preds = predict(SL_all, flintX_all)
+big_flint_preds = predict(big_SL, flintX)
+big_flint_log_preds = predict(big_SL_log, flintX_log)
+big_flint_all_preds = predict(big_SL_all, flintX_all)
+
+# NHANES
+nhanes_preds = predict(SL, nhanesX)
+nhanes_log_preds = predict(SL_log, nhanesX_log)
+nhanes_all_preds = predict(SL_all, nhanesX_all)
+big_nhanes_preds = predict(big_SL, nhanesX)
+big_nhanes_log_preds = predict(big_SL_log, nhanesX_log)
+big_nhanes_all_preds = predict(big_SL_all, nhanesX_all)
+```
+
+# AUCs and ROCs
+
+In each validation set, we calculate the AUC for each of the six predicted superlearner scores as well as the six other fibrosis scores under consideration (APRI, BARD, FIB4, Forns, NFS, and SAFE). The NHANES-NAFLD AUCs incorporate sampling weights. 
+
+```{r}
+# Function to calculate APRI, BARD, FIB-4, Forns, NFS, and SAFE scores
+calc_other_scores = function(dat, AST_upper = 40) {
+  # Initialize data frame for storing scores
+  scores = data.frame(matrix(, nrow=nrow(dat), ncol = 0))
+  
+  # APRI
+  scores$APRI = 100 * (dat$AST / AST_upper) / dat$PLAT
+  
+  # BARD
+  scores$BARD = as.numeric(
+    2*((dat$AST / dat$ALT) >= 0.8) + dat$DIAB2 + (dat$BMI >= 28)
+  )
+  
+  # FIB-4
+  scores$FIB4 = (dat$AGE * dat$AST) / (dat$PLAT * sqrt(dat$ALT))
+  
+  # Forns
+  scores$Forns = 7.811 - 3.131 * log(dat$PLAT) + 0.781 * log(dat$GGT) + 
+    3.467 * log(dat$AGE) - 0.014 * dat$CHOL
+
+  # NFS  
+  scores$NFS = (-1.675) + (0.037 * dat$AGE) + (0.094 * dat$BMI) + 
+    (1.13 * dat$DIAB2) +  (0.99 * (dat$AST / dat$ALT)) - 
+    (0.013 * dat$PLAT) - (0.66 * dat$ALB)
+  
+  # SAFE 
+  scores$SAFE = 2.97 * dat$AGE + 
+    5.99 * dat$BMI40 + 
+    62.85 * dat$DIAB2 +
+    154.85 * log(dat$AST) - 
+    58.23 * log(dat$ALT) + 
+    195.48 * log(dat$GLOB)- 
+    141.61 * log(dat$PLAT)- 
+    75
+  
+  return(scores)
+}
+
+# Function to calculate AUC for multiple scores
+calc_AUC = function(preds, response) {
+  sapply(preds, function(x) {
+    AUC = cvAUC::AUC(x, response)
+  })
+}
+
+# Function to calculate AUC for multiple scores, 
+# while accounting for sampling weights
+calc_AUC_weighted = function(preds, response, weights) {
+  sapply(preds, function(x) {
+    AUC = WeightedAUC(WeightedROC(x, response, weights))
+  })
+}
+
+# FLINT scores
+scores_flint = data.frame(SL = flint_preds$pred, 
+                          SL_log = flint_log_preds$pred, 
+                          SL_all = flint_all_preds$pred, 
+                          big_SL = big_flint_preds$pred, 
+                          big_SL_log = big_flint_log_preds$pred, 
+                          big_SL_all = big_flint_all_preds$pred, 
+                          calc_other_scores(flint))
+AUC_flint = calc_AUC(scores_flint, flintY)
+
+# NHANES-NAFLD scores
+scores_nhanes = data.frame(SL = nhanes_preds$pred, 
+                           SL_log = nhanes_log_preds$pred, 
+                           SL_all = nhanes_all_preds$pred, 
+                           big_SL = big_nhanes_preds$pred, 
+                           big_SL_log = big_nhanes_log_preds$pred, 
+                           big_SL_all = big_nhanes_all_preds$pred, 
+                           calc_other_scores(nhanes))
+AUC_nhanes = calc_AUC_weighted(scores_nhanes, nhanesY, nhanes_weights)
+```
+
+Confidence intervals for the AUCs are obtained by bootstrapping the data 1000 times and taking the 95% percentiles of the bootstrapped AUCs.  
+
+```{r, eval = FALSE}
+# Function to calculate bootstrap AUCs for multiple scores
+boot_AUC = function(preds, response, B = 1000) {
+  run_boot = function(){
+    # Sample indices with replacement
+    boot_idx = sample(length(response), replace = TRUE)
+    # Calculate bootstrap AUC
+    return(sapply(preds, function(x) {
+      cvAUC::AUC(x[boot_idx], response[boot_idx])
+    }))
+  }
+  
+  return(t(replicate(B, run_boot())))
+}
+
+# Function to calculate bootstrap weighted AUCs for multiple scores
+boot_AUC_weighted = function(preds, response,  weights, B = 1000) {
+  run_boot = function(){
+    # Sample indices with replacement
+    boot_idx = sample(length(response), replace = TRUE)
+    # Calculate bootstrap AUC
+    return(sapply(preds, function(x) {
+      WeightedAUC(WeightedROC(x[boot_idx], response[boot_idx], 
+                              weights[boot_idx]))
+    }))
+  }
+  
+  return(t(replicate(B, run_boot())))
+}
+
+# FLINT bootstrapped AUCs
+set.seed(1)
+boot_AUC_flint = boot_AUC(scores_flint, flintY)
+
+# NHANES-NAFLD bootstrapped AUCs
+set.seed(1)
+boot_AUC_nhanes = boot_AUC_weighted(scores_nhanes, nhanesY, nhanes_weights)
+save(boot_AUC_flint, boot_AUC_nhanes, file = "boot_AUC.rData")
+```
+
+```{r, echo = FALSE}
+load("boot_AUC.rData")
+```
+
+We present the AUCs and 95% confidence intervals for each model and validation dataset as a table. 
+
+```{r}
+# AUCs with 95% CIs
+AUC_CI_df = cbind(
+  "FLINT" = AUC_flint, 
+  "FLINT 2.5%" = apply(boot_AUC_flint, 2, quantile, 0.025), 
+  "FLINT 97.5%" = apply(boot_AUC_flint, 2, quantile, 0.975), 
+  "NHANES-NAFLD" = AUC_nhanes, 
+  "NHANES-NAFLD 2.5%" = apply(boot_AUC_nhanes, 2, quantile, 0.025), 
+  "NHANES-NAFLD 97.5%" = apply(boot_AUC_nhanes, 2, quantile, 0.975))
+
+# Formatting as table
+AUC_CI_table = matrix(paste0(
+  round(AUC_CI_df[,seq(1, ncol(AUC_CI_df), by = 3)], 3), " (", 
+  round(AUC_CI_df[,seq(2, ncol(AUC_CI_df), by = 3)], 3), ", ", 
+  round(AUC_CI_df[,seq(3, ncol(AUC_CI_df), by = 3)], 3), ")"), 
+  nrow = nrow(AUC_CI_df), ncol = ncol(AUC_CI_df)/3)
+rownames(AUC_CI_table) = c("SL-12", "SL-12 (log)", "SL-12 (all)",
+                           "SL-90", "SL-90 (log)", "SL-90 (all)", 
+                           "APRI","BARD", "FIB-4", "Forns", "NFS", "SAFE")
+colnames(AUC_CI_table) = c("FLINT", "NHANES-NAFLD")
+write.csv(AUC_CI_table, file = "AUC_CI_table.csv")
+knitr::kable(AUC_CI_table)
+```
+
+And as a plot. 
+
+```{r}
+# Models to present in main text
+mod_names = c("Superlearner", "APRI","BARD", "FIB-4", "Forns", "NFS", "SAFE")
+mod_sub_names = c("big_SL_log", "APRI", "BARD", "FIB4", "Forns", "NFS", "SAFE")
+
+# Plot AUCs with CIs
+AUC_CI_df = AUC_CI_df[mod_sub_names,]
+rownames(AUC_CI_df) = mod_names
+p1 = melt(AUC_CI_df[,seq(1, ncol(AUC_CI_df), by = 3)]) %>% 
+  rename(Model = Var1, Data = Var2, est = value) %>% 
+  mutate(lo = melt(AUC_CI_df[,seq(2, ncol(AUC_CI_df), by = 3)])$value, 
+         hi = melt(AUC_CI_df[,seq(3, ncol(AUC_CI_df), by = 3)])$value, 
+         x = rep(1:2, each = 7) + rep(seq(-0.3, 0.3, length = 7), 2)) %>% 
+  ggplot(aes(x = x, y = est, col = Model)) + 
+  geom_pointrange(aes(ymin = lo, ymax = hi), size = 0.3) + 
+  xlab("") + ylab("AUC") + 
+  scale_x_continuous(breaks = 1:2, 
+                     labels = c("FLINT", 
+                                "NHANES-NAFLD")) + 
+  theme(axis.text.x = element_text(size = 10))
+
+ggsave("AUC_CI.png", p1)
+p1
+```
+
+We can also use ROC curves to visualize the each scoring approach ability to discriminate significant fibrosis. 
+
+```{r, fig.height = 3.5}
+# FLINT
+p1 = rbind(
+  do.call(data.frame, 
+          c(roc(flintY, scores_flint$big_SL_log)[c("sensitivities", "specificities")], 
+            Model = "Superlearner")), 
+  do.call(data.frame, 
+          c(roc(flintY, scores_flint$APRI)[c("sensitivities", "specificities")], 
+            Model = "APRI")), 
+  do.call(data.frame, 
+          c(roc(flintY, scores_flint$BARD)[c("sensitivities", "specificities")], 
+            Model = "BARD")), 
+  do.call(data.frame, 
+          c(roc(flintY, scores_flint$FIB4)[c("sensitivities", "specificities")], 
+            Model = "FIB-4")), 
+  do.call(data.frame, 
+          c(roc(flintY, scores_flint$Forns)[c("sensitivities", "specificities")], 
+            Model = "Forns")), 
+  do.call(data.frame, 
+          c(roc(flintY, scores_flint$NFS)[c("sensitivities", "specificities")], 
+            Model = "NFS")),
+  do.call(data.frame, 
+          c(roc(flintY, scores_flint$SAFE)[c("sensitivities", "specificities")], 
+            Model = "SAFE"))) %>% 
+  mutate(Model = fct_relevel(Model, mod_names)) %>%
+  ggplot(aes(x = specificities, y = sensitivities, col = Model)) + 
+  geom_path() + 
+  scale_x_reverse() + 
+  geom_abline(intercept = 1, slope = 1, col = "grey") +
+  xlab("Specificity") + ylab("Sensitivity") + 
+  ggtitle("FLINT")
+
+# NHANES-NAFLD
+p2 = rbind(
+  cbind(WeightedROC(scores_nhanes$big_SL_log, nhanesY, nhanes_weights), 
+        Model = "Superlearner"), 
+  cbind(WeightedROC(scores_nhanes$APRI, nhanesY, nhanes_weights), 
+        Model = "APRI"), 
+  cbind(WeightedROC(scores_nhanes$BARD, nhanesY, nhanes_weights), 
+        Model = "BARD"), 
+  cbind(WeightedROC(scores_nhanes$FIB4, nhanesY, nhanes_weights), 
+        Model = "FIB-4"), 
+  cbind(WeightedROC(scores_nhanes$Forns, nhanesY, nhanes_weights), 
+        Model = "Forns"), 
+  cbind(WeightedROC(scores_nhanes$NFS, nhanesY, nhanes_weights), 
+        Model = "NFS"), 
+  cbind(WeightedROC(scores_nhanes$SAFE, nhanesY, nhanes_weights), 
+        Model = "SAFE")) %>% 
+  mutate(Model = fct_relevel(Model, mod_names)) %>%
+  ggplot(aes(x = 1 - FPR, y = TPR, col = Model)) + 
+  geom_path() + 
+  scale_x_reverse() + 
+  geom_abline(intercept = 1, slope = 1, col = "grey") +
+  xlab("Specificity") + ylab("Sensitivity") + 
+  ggtitle("NHANES-NAFLD") 
+
+# Legend
+p0 = gtable_filter(ggplot_gtable(ggplot_build(p2)), "guide-box")
+
+# Put all ROC plots and legend together
+png("ROC.png", width = 1100, height = 500, res = 140)
+plot_grid(p1 + guides(col = "none"), 
+          p2 + guides(col = "none"), 
+          p0, ncol = 3, rel_widths = c(3/7, 3/7, 1/7))
+invisible(dev.off())
+
+plot_grid(p1 + guides(col = "none"), 
+          p2 + guides(col = "none"), 
+          p0, ncol = 3, rel_widths = c(3/7, 3/7, 1/7))
+```
+
+# Scatterplots
+
+This is a plot of the superlearner (90 base models, log-transformed predictors) vs. SAFE scores for each cohort. Those with significant fibrosis are colored pink and those without are blue. The Spearman's correlation coefficient is reported in the lower right; the NHANES-NAFLD correlation accounts for the survey design. 
+
+```{r}
+# Function to calculate Spearman's correlation for complex surveys
+svyspear = function(x, y, design) {
+  vmat = as.matrix(svyvar(~rank(x)+rank(y), design))
+  attr(vmat, "var") = NULL #remove extra info
+  attr(vmat, "statistic") = NULL #remove extra info
+  cov2cor(vmat)[1,2]
+}
+
+# Combine scores and outcomes for all cohorts
+stacked_scores_df = rbind(
+  data.frame(scores_flint, sigfibro = flint$sigfibro, cohort = "FLINT"), 
+  data.frame(scores_nhanes,  sigfibro = nhanes$sigfibro, cohort = "NHANES-NAFLD")
+)
+
+# Spearman's correlation between superlearner and SAFE
+sl_safe_spear = data.frame(
+  cohort = c("FLINT", "NHANES-NAFLD"), 
+  Cor = c(with(scores_flint, cor(big_SL_log, SAFE)), 
+          with(scores_nhanes, svyspear(big_SL_log, SAFE, nhanes_design)))
+)
+
+# Plot superlearner against SAFE scores
+p1 = stacked_scores_df %>% 
+  ggplot(aes(x = SAFE, y = big_SL_log, col = as.factor(sigfibro))) + 
+  geom_point(alpha = 0.5) + 
+  facet_wrap(~cohort) + 
+  geom_label(data = sl_safe_spear, aes(label = round(Cor, 2), col = "black"), 
+            x = Inf, y = -Inf, vjust = "inward", hjust = "inward", 
+            alpha = 0.8, size = 3) + 
+  scale_color_discrete(name = "Significant Fibrosis", 
+                       limits = c("1", "0"), labels = c("Yes", "No")) + 
+  ylab("Superlearner") + theme(legend.position="bottom") 
+ggsave("sl_vs_safe.png", width = 6.5, height = 4)
+p1
+```
+
+We plot log-transformed LSM against the superlearner (90 base models, log-transformed predictors), APRI, BARD, FIB4, Forns, NFS, and SAFE scores in the NHANES-NAFLD cohort. 
+
+```{r}
+# LSM for NHANES-NAFLD
+nhanes_lsm_df = data.frame(LSM = nhanes$LSM, 
+           scores_nhanes[,mod_sub_names], 
+           Weights = nhanes_weights) %>% 
+  rename("FIB-4" = "FIB4", "Superlearner" = "big_SL_log") %>% 
+  melt(id.vars = c("LSM", "Weights"), variable.name = "Model", value.name = "Score") 
+
+# Spearman's correlation with LSM
+nhanes_lsm_spear = nhanes_lsm_df %>% group_by(Model) %>% 
+  summarise("NHANES-NAFLD" = svyspear(LSM, Score, nhanes_design))
+
+# Plot LSM against scores
+p1 = nhanes_lsm_df %>% 
+  ggplot(aes(x = Score, y = LSM, col = Model)) + 
+  geom_point(alpha = 0.5) + 
+  geom_smooth(method = 'loess', se = FALSE, lwd = 0.5) + 
+  scale_y_log10() + 
+  geom_label(data = nhanes_lsm_spear, aes(label = round(`NHANES-NAFLD`, 2)), 
+            x = Inf, y = -Inf, vjust = "inward", hjust = "inward", 
+            alpha = 0.8, size = 3) + 
+  facet_wrap(~Model, scales = "free_x", ncol = 4) + 
+  ylab("Liver Stiffness Measure (kPa)") + 
+  guides(col = "none")
+
+ggsave("nhanes_lsm.png", p1)
+p1
+```
+
+We calculate the FAST, Agile3+ and Agile4 scores for the NHANES-NAFLD cohort. 
+
+```{r}
+# Expit function
+expit = function(x) {
+  exp(x) / (1 + exp(x))
+}
+
+# NHANES-NAFLD FAST, Agile3+, and Agile4 scores
+nhanes = nhanes %>% 
+  mutate(FAST = expit(-1.65 + 1.07*log(LSM) + 
+                        2.66*10^(-8)*CAP^3 - 63.3/AST), 
+         Agile3 = -3.92368 + 2.29714 * log(LSM) - 0.00902 * PLAT - 
+           0.98633 / (AST/ALT) + 1.08636 * DIAB2 - 0.38581 * MALE + 0.03018 * AGE, 
+         Agile4 = 7.50139 - 15.42498 / sqrt(LSM) - 0.01378 * PLAT - 
+           1.41149 / (AST/ALT) - 0.53281 * MALE + 0.41741 * DIAB2)
+```
+
+This figure plots the log-transformed Fibro-AST score against the superlearner (90 base models, log-transformed predictors), APRI, BARD, FIB4, Forns, NFS, and SAFE scores. 
+
+```{r}
+# Fibro-AST for NHANES-NAFLD
+nhanes_fast_df = data.frame(FAST = nhanes$FAST, 
+           scores_nhanes[,mod_sub_names], 
+           Weights = nhanes_weights) %>% 
+  rename("FIB-4" = "FIB4", "Superlearner" = "big_SL_log") %>% 
+  melt(id.vars = c("FAST", "Weights"), variable.name = "Model", value.name = "Score") 
+
+# Spearman's correlation with FAST
+nhanes_fast_spear = nhanes_fast_df %>% group_by(Model) %>% 
+  summarise("NHANES-NAFLD" = svyspear(FAST, Score, nhanes_design))
+
+# Plot FAST against other scores
+p1 = nhanes_fast_df %>% 
+  ggplot(aes(x = Score, y = FAST, col = Model)) + 
+  geom_point(alpha = 0.5) + 
+  geom_smooth(method = 'loess', se = FALSE, lwd = 0.5) + 
+  scale_y_log10() + 
+  geom_label(data = nhanes_fast_spear, aes(label = round(`NHANES-NAFLD`, 2)), 
+            x = Inf, y = -Inf, vjust = "inward", hjust = "inward", 
+            alpha = 0.8, size = 3) + 
+  facet_wrap(~Model, scales = "free_x", ncol = 4) + 
+  ylab("FibroScan-AST") + 
+  guides(col = "none")
+ggsave("nhanes_fast.png", p1)
+p1
+```
+
+We plot Agile3+ against the superlearner (90 base models, log-transformed predictors), BARD, APRI, FIB4, Forns, NFS, and SAFE scores. 
+
+```{r}
+# Agile3+ for NHANES-NAFLD
+nhanes_agile3_df = data.frame(Agile3 = nhanes$Agile3, 
+           scores_nhanes[,mod_sub_names], 
+           Weights = nhanes_weights) %>% 
+  rename("FIB-4" = "FIB4", "Superlearner" = "big_SL_log") %>% 
+  melt(id.vars = c("Agile3", "Weights"), variable.name = "Model", value.name = "Score") 
+
+# Spearman's correlation with Agile3+
+nhanes_agile3_spear = nhanes_agile3_df %>% group_by(Model) %>% 
+  summarise("NHANES-NAFLD" = svyspear(Agile3, Score, nhanes_design))
+
+# Plot Agile3+ against other scores
+p1 = nhanes_agile3_df %>% 
+  ggplot(aes(x = Score, y = Agile3, col = Model)) + 
+  geom_point(alpha = 0.5) + 
+  geom_smooth(method = 'loess', se = FALSE, lwd = 0.5) + 
+  geom_label(data = nhanes_agile3_spear, aes(label = round(`NHANES-NAFLD`, 2)), 
+            x = Inf, y = -Inf, vjust = "inward", hjust = "inward", 
+            alpha = 0.8, size = 3) + 
+  facet_wrap(~Model, scales = "free_x", ncol = 4) + 
+  ylab("Agile3+") + 
+  guides(col = "none")
+ggsave("nhanes_agile3.png", p1)
+p1
+```
+
+We plot Agile4 against the superlearner (90 base models, log-transformed predictors), APRI, BARD, FIB4, Forns, NFS, and SAFE scores. 
+
+```{r}
+# Agile4 for NHANES-NAFLD
+nhanes_agile4_df = data.frame(Agile4 = nhanes$Agile4, 
+           scores_nhanes[,mod_sub_names], 
+           Weights = nhanes_weights) %>% 
+  rename("FIB-4" = "FIB4", "Superlearner" = "big_SL_log") %>% 
+  melt(id.vars = c("Agile4", "Weights"), variable.name = "Model", value.name = "Score") 
+
+# Spearman's correlation with Agile4
+nhanes_agile4_spear = nhanes_agile4_df %>% group_by(Model) %>% 
+  summarise("NHANES-NAFLD" = svyspear(Agile4, Score, nhanes_design))
+
+# Plot Agile4 against other scores
+p1 = nhanes_agile4_df %>% 
+  ggplot(aes(x = Score, y = Agile4, col = Model)) + 
+  geom_point(alpha = 0.5) + 
+  geom_smooth(method = 'loess', se = FALSE, lwd = 0.5) + 
+  geom_label(data = nhanes_agile4_spear, aes(label = round(`NHANES-NAFLD`, 2)), 
+            x = Inf, y = -Inf, vjust = "inward", hjust = "inward", 
+            alpha = 0.8, size = 3) + 
+  facet_wrap(~Model, scales = "free_x", ncol = 4) + 
+  ylab("Agile4") + 
+  guides(col = "none")
+ggsave("nhanes_agile4.png", p1)
+p1
+```
+
+# Standardized means by quartile
+
+First, for each validation cohort, we standardize the continuous variables by subtracting the mean and dividing by the standard deviation. In the NHANES-NAFLD cohort, we use means and standard deviations calculated for complex survey designs, which incorporate sampling weights, clusters, and strata. Then, for each quartile defined by the superlearner and SAFE scores (weighted quartiles for NHANES-NAFLD), we can calculate the standardized mean of each continuous predictor and the mean of each binary predictor. Confidence intervals were obtained using the usual normal approximation for continuous covariates; we used Wald confidence intervals for the binary covariates. Again, the NHANES-NAFLD mean and confidence interval reported are based on the appropriate estimates for complex survey designs. 
+
+```{r,  fig.height = 8}
+# Functions to calculate standard errors for continuous and binary variables
+SE = function(x) {
+  sd(x) / sqrt(length(x))
+}
+SE_binomial = function(x) {
+  sqrt(mean(x) * (1 - mean(x)) / length(x))
+}
+
+# Function to calculate weighted standard errors 
+svySE = function(x, design) {
+  data.frame(svymean(x, design))$SE
+}
+
+
+# FLINT
+# Standardize all continuous variables
+std_flint_df = sapply(1:length(pred_vars), function(i) {
+  if (!(pred_vars[i] %in% pred_vars_binary)) {
+    return(scale(flint[,pred_vars[i]]))
+  } else {
+    return(flint[,pred_vars[i]])
+  }
+})
+colnames(std_flint_df) = pred_vars
+
+# Put together data frame with all predictors, SAFE, and superlearner quartiles
+std_flint_df = data.frame(
+  std_flint_df, 
+  quantiles_SAFE = cut(scores_flint$SAFE,
+                       breaks = c(-Inf, quantile(scores_flint$SAFE, 
+                                                 c(0.25, 0.5, 0.75)), Inf), 
+                       labels = 1:4), 
+  quantiles_SL = cut(scores_flint$big_SL_log,
+                     breaks = c(-Inf, quantile(scores_flint$big_SL_log, 
+                                               c(0.25, 0.5, 0.75)), Inf), 
+                     labels = 1:4))
+
+# Summarize data by quartile
+std_flint_plot_df = rbind(
+  data.frame(
+    std_flint_df %>% rename(Quantile = "quantiles_SAFE") %>% 
+      group_by(Quantile) %>% 
+      summarise(across(-quantiles_SL, 
+                       list(est = ~mean(.x), 
+                            lo = ~(mean(.x) - qnorm(.975) * 
+                                     ifelse(length(unique(.x)) == 2 && 
+                                              all(sort(unique(.x)) == c(0, 1)), 
+                                            SE_binomial(.x), SE(.x))), 
+                            hi = ~(mean(.x) + qnorm(.975) * 
+                                     ifelse(length(unique(.x)) == 2 && 
+                                              all(sort(unique(.x)) == c(0, 1)), 
+                                           SE_binomial(.x), SE(.x)))))) %>%
+      pivot_longer(cols = -Quantile,
+                   names_sep = "_", 
+                   names_to  = c("variable", ".value")), 
+    Score = "SAFE"), 
+  data.frame(
+    std_flint_df %>% rename(Quantile = "quantiles_SL") %>% 
+      group_by(Quantile) %>% 
+      summarise(across(-quantiles_SAFE, 
+                       list(est = ~mean(.x), 
+                            lo = ~(mean(.x) - qnorm(.975) * 
+                                     ifelse(length(unique(.x)) == 2 && 
+                                              all(sort(unique(.x)) == c(0, 1)), 
+                                            SE_binomial(.x), SE(.x))), 
+                            hi = ~(mean(.x) + qnorm(.975) * 
+                                     ifelse(length(unique(.x)) == 2 && 
+                                              all(sort(unique(.x)) == c(0, 1)), 
+                                            SE_binomial(.x), SE(.x)))))) %>%
+      pivot_longer(cols = -Quantile,
+                   names_sep = "_", 
+                   names_to  = c("variable", ".value")), 
+    Score = "Superlearner")
+)
+
+
+# NHANES-NAFLD
+# Standardize all continuous variables
+std_nhanes_df = sapply(1:length(pred_vars), function(i) {
+  if (!(pred_vars[i] %in% pred_vars_binary)) {
+    return((nhanes[,pred_vars[i]] - weighted.mean(nhanes[,pred_vars[i]], nhanes_weights)) / 
+             sqrt(svyvar(nhanes[,pred_vars[i]], nhanes_design)))
+  } else {
+    return(nhanes[,pred_vars][,i])
+  }
+})
+colnames(std_nhanes_df) = pred_vars
+
+# Put together data frame with all predictors, SAFE, and superlearner quartiles
+std_nhanes_df = data.frame(
+  std_nhanes_df, 
+  quantiles_SAFE = cut(scores_nhanes$SAFE,
+                       breaks = c(-Inf, Quantile(scores_nhanes$SAFE, 
+                                                 nhanes_weights, 
+                                                 c(0.25, 0.5, 0.75)), Inf), 
+                       labels = 1:4), 
+  quantiles_SL = cut(scores_nhanes$big_SL_log,
+                     breaks = c(-Inf, Quantile(scores_nhanes$big_SL_log, 
+                                               nhanes_weights, 
+                                               c(0.25, 0.5, 0.75)), Inf), 
+                     labels = 1:4), 
+  weights = nhanes_weights)
+
+# Subset complex survey designs by quartile
+nhanes_design_by_quantiles_SAFE = lapply(1:4, function(i) {
+  subset(nhanes_design, std_nhanes_df$quantiles_SAFE == i)
+})
+nhanes_design_by_quantiles_SL = lapply(1:4, function(i) {
+  subset(nhanes_design, std_nhanes_df$quantiles_SL == i)
+})
+
+# Summarize data by quartile
+std_nhanes_plot_df = rbind(
+  data.frame(
+    std_nhanes_df %>% rename(Quantile = "quantiles_SAFE") %>% 
+      group_by(Quantile) %>% 
+      summarise(across(
+        -all_of(c("weights", "quantiles_SL")), 
+        list(est = ~weighted.mean(.x, weights), 
+             lo = ~(weighted.mean(.x, weights) - qnorm(.975) * 
+                      svySE(.x, nhanes_design_by_quantiles_SAFE[[unique(Quantile)]])), 
+             hi = ~(weighted.mean(.x, weights) + qnorm(.975) * 
+                      svySE(.x, nhanes_design_by_quantiles_SAFE[[unique(Quantile)]]))))) %>%
+      pivot_longer(cols = -Quantile,
+                   names_sep = "_", 
+                   names_to  = c("variable", ".value")), 
+    Score = "SAFE"), 
+  data.frame(
+    std_nhanes_df %>% rename(Quantile = "quantiles_SL") %>% 
+      group_by(Quantile) %>% 
+      summarise(across(
+        -all_of(c("weights", "quantiles_SAFE")), 
+        list(est = ~weighted.mean(.x, weights), 
+             lo = ~(weighted.mean(.x, weights) - qnorm(.975) * 
+                      svySE(.x, nhanes_design_by_quantiles_SL[[unique(Quantile)]])), 
+             hi = ~(weighted.mean(.x, weights) + qnorm(.975) * 
+                      svySE(.x, nhanes_design_by_quantiles_SL[[unique(Quantile)]]))))) %>%
+      pivot_longer(cols = -Quantile,
+                   names_sep = "_", 
+                   names_to  = c("variable", ".value")), 
+    Score = "Superlearner")
+)
+
+
+# Plot standardized means for each quartile, cohort, and score
+p1 = rbind(data.frame(std_flint_plot_df, Cohort = "FLINT"), 
+      data.frame(std_nhanes_plot_df, Cohort = "NHANES-NAFLD"))  %>% 
+  mutate(y = rep(rep(match(pred_vars, dat_dict$short), 4) + 
+                   rep(seq(-0.2, 0.2, length = 4), each = length(pred_vars)), 2*2)) %>% 
+  ggplot(aes(x = as.numeric(est), y = y, color = Quantile)) +
+  geom_pointrange(aes(xmin = lo, xmax = hi), size = 0.25) + 
+  facet_grid(Cohort ~ fct_rev(Score)) + 
+    scale_color_manual(values = c("navy", "dodgerblue", "mediumpurple","firebrick")) + 
+    scale_y_continuous(breaks = match(pred_vars, dat_dict$short), 
+                       labels = dat_dict$long[match(pred_vars, dat_dict$short)], 
+                       expand = c(0.015, 0.015)) + 
+    xlab("Standardized mean within quartile") + ylab("") + 
+    theme(legend.position="bottom")
+ggsave("std_means.png", p1, width = 7, height = 8)
+p1
+```
