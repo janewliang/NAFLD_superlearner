@@ -2,7 +2,7 @@
 title: "Novel machine learning approaches to the non-invasive diagnosis of liver fibrosis in NAFLD"
 output: html_document
 author: "Vivek Charu, Jane W. Liang, Ajitha Mannalithara, Allison Kwong, and W. Ray Kim"
-date: "2023-01-05"
+date: "2023-05-04"
 ---
 
 ```{r setup, include=FALSE}
@@ -281,7 +281,7 @@ colnames(tab1) = colnames(center_tab)
 tab1 = merge(dat_dict, tab1, by.x = "short", by.y = 0, sort = FALSE)
 rownames(tab1) = tab1$long
 tab1$short = NULL; tab1$long = NULL
-write.csv(tab1, file = "tab1.csv")
+write.csv(tab1, file = "figs_and_tabs/tab1.csv")
 knitr::kable(tab1)
 ```
 
@@ -463,7 +463,7 @@ coef_SL_tab = merge(sl_dict, coef_SL_tab, by.x = "short", by.y = 0, sort = FALSE
 rownames(coef_SL_tab) = paste(coef_SL_tab$short, coef_SL_tab$long)
 coef_SL_tab$short = NULL; coef_SL_tab$long = NULL
 
-write.csv(round(coef_SL_tab, 3), file = "coef_SL_tab.csv")
+write.csv(round(coef_SL_tab, 3), file = "figs_and_tabs/coef_SL_tab.csv")
 ```
 
 # Validate superlearners
@@ -635,16 +635,16 @@ rownames(AUC_CI_table) = c("SL-12", "SL-12 (log)", "SL-12 (all)",
                            "SL-90", "SL-90 (log)", "SL-90 (all)", 
                            "APRI","BARD", "FIB-4", "Forns", "NFS", "SAFE")
 colnames(AUC_CI_table) = c("FLINT", "NHANES-NAFLD")
-write.csv(AUC_CI_table, file = "AUC_CI_table.csv")
+write.csv(AUC_CI_table, file = "figs_and_tabs/AUC_CI_table.csv")
 knitr::kable(AUC_CI_table)
 ```
 
-And as a plot. 
+And as a plot. For brevity, we only show the results from the superlearner with 12 base models and all predictors for the remainder of the analysis. 
 
 ```{r}
 # Models to present in main text
 mod_names = c("Superlearner", "APRI","BARD", "FIB-4", "Forns", "NFS", "SAFE")
-mod_sub_names = c("big_SL_log", "APRI", "BARD", "FIB4", "Forns", "NFS", "SAFE")
+mod_sub_names = c("SL_all", "APRI", "BARD", "FIB4", "Forns", "NFS", "SAFE")
 
 # Plot AUCs with CIs
 AUC_CI_df = AUC_CI_df[mod_sub_names,]
@@ -662,7 +662,7 @@ p1 = melt(AUC_CI_df[,seq(1, ncol(AUC_CI_df), by = 3)]) %>%
                                 "NHANES-NAFLD")) + 
   theme(axis.text.x = element_text(size = 10))
 
-ggsave("AUC_CI.png", p1)
+ggsave("figs_and_tabs/AUC_CI.png", p1, width = 6.5, height = 4)
 p1
 ```
 
@@ -672,7 +672,7 @@ We can also use ROC curves to visualize the each scoring approach ability to dis
 # FLINT
 p1 = rbind(
   do.call(data.frame, 
-          c(roc(flintY, scores_flint$big_SL_log)[c("sensitivities", "specificities")], 
+          c(roc(flintY, scores_flint$SL_all)[c("sensitivities", "specificities")], 
             Model = "Superlearner")), 
   do.call(data.frame, 
           c(roc(flintY, scores_flint$APRI)[c("sensitivities", "specificities")], 
@@ -702,7 +702,7 @@ p1 = rbind(
 
 # NHANES-NAFLD
 p2 = rbind(
-  cbind(WeightedROC(scores_nhanes$big_SL_log, nhanesY, nhanes_weights), 
+  cbind(WeightedROC(scores_nhanes$SL_all, nhanesY, nhanes_weights), 
         Model = "Superlearner"), 
   cbind(WeightedROC(scores_nhanes$APRI, nhanesY, nhanes_weights), 
         Model = "APRI"), 
@@ -728,7 +728,7 @@ p2 = rbind(
 p0 = gtable_filter(ggplot_gtable(ggplot_build(p2)), "guide-box")
 
 # Put all ROC plots and legend together
-png("ROC.png", width = 1100, height = 500, res = 140)
+png("figs_and_tabs/ROC.png", width = 1100, height = 500, res = 140)
 plot_grid(p1 + guides(col = "none"), 
           p2 + guides(col = "none"), 
           p0, ncol = 3, rel_widths = c(3/7, 3/7, 1/7))
@@ -761,22 +761,22 @@ stacked_scores_df = rbind(
 # Spearman's correlation between superlearner and SAFE
 sl_safe_spear = data.frame(
   cohort = c("FLINT", "NHANES-NAFLD"), 
-  Cor = c(with(scores_flint, cor(big_SL_log, SAFE)), 
-          with(scores_nhanes, svyspear(big_SL_log, SAFE, nhanes_design)))
+  Cor = c(with(scores_flint, cor(SL_all, SAFE)), 
+          with(scores_nhanes, svyspear(SL_all, SAFE, nhanes_design)))
 )
 
 # Plot superlearner against SAFE scores
 p1 = stacked_scores_df %>% 
-  ggplot(aes(x = SAFE, y = big_SL_log, col = as.factor(sigfibro))) + 
+  ggplot(aes(x = SAFE, y = SL_all, col = as.factor(sigfibro))) + 
   geom_point(alpha = 0.5) + 
   facet_wrap(~cohort) + 
   geom_label(data = sl_safe_spear, aes(label = round(Cor, 2), col = "black"), 
-            x = Inf, y = -Inf, vjust = "inward", hjust = "inward", 
+            x = Inf, y = -Inf, vjust = -0.2, hjust = "inward", 
             alpha = 0.8, size = 3) + 
   scale_color_discrete(name = "Significant Fibrosis", 
                        limits = c("1", "0"), labels = c("Yes", "No")) + 
   ylab("Superlearner") + theme(legend.position="bottom") 
-ggsave("sl_vs_safe.png", width = 6.5, height = 4)
+ggsave("figs_and_tabs/sl_vs_safe.png", width = 6.5, height = 4)
 p1
 ```
 
@@ -787,7 +787,7 @@ We plot log-transformed LSM against the superlearner (90 base models, log-transf
 nhanes_lsm_df = data.frame(LSM = nhanes$LSM, 
            scores_nhanes[,mod_sub_names], 
            Weights = nhanes_weights) %>% 
-  rename("FIB-4" = "FIB4", "Superlearner" = "big_SL_log") %>% 
+  rename("FIB-4" = "FIB4", "Superlearner" = "SL_all") %>% 
   melt(id.vars = c("LSM", "Weights"), variable.name = "Model", value.name = "Score") 
 
 # Spearman's correlation with LSM
@@ -801,13 +801,13 @@ p1 = nhanes_lsm_df %>%
   geom_smooth(method = 'loess', se = FALSE, lwd = 0.5) + 
   scale_y_log10() + 
   geom_label(data = nhanes_lsm_spear, aes(label = round(`NHANES-NAFLD`, 2)), 
-            x = Inf, y = -Inf, vjust = "inward", hjust = "inward", 
+            x = Inf, y = -Inf, vjust = -0.2, hjust = "inward", 
             alpha = 0.8, size = 3) + 
   facet_wrap(~Model, scales = "free_x", ncol = 4) + 
   ylab("Liver Stiffness Measure (kPa)") + 
   guides(col = "none")
 
-ggsave("nhanes_lsm.png", p1)
+ggsave("figs_and_tabs/nhanes_lsm.png", p1, width = 6.5, height = 4)
 p1
 ```
 
@@ -836,7 +836,7 @@ This figure plots the log-transformed Fibro-AST score against the superlearner (
 nhanes_fast_df = data.frame(FAST = nhanes$FAST, 
            scores_nhanes[,mod_sub_names], 
            Weights = nhanes_weights) %>% 
-  rename("FIB-4" = "FIB4", "Superlearner" = "big_SL_log") %>% 
+  rename("FIB-4" = "FIB4", "Superlearner" = "SL_all") %>% 
   melt(id.vars = c("FAST", "Weights"), variable.name = "Model", value.name = "Score") 
 
 # Spearman's correlation with FAST
@@ -850,12 +850,12 @@ p1 = nhanes_fast_df %>%
   geom_smooth(method = 'loess', se = FALSE, lwd = 0.5) + 
   scale_y_log10() + 
   geom_label(data = nhanes_fast_spear, aes(label = round(`NHANES-NAFLD`, 2)), 
-            x = Inf, y = -Inf, vjust = "inward", hjust = "inward", 
+            x = Inf, y = -Inf, vjust = -0.2, hjust = "inward", 
             alpha = 0.8, size = 3) + 
   facet_wrap(~Model, scales = "free_x", ncol = 4) + 
   ylab("FibroScan-AST") + 
   guides(col = "none")
-ggsave("nhanes_fast.png", p1)
+ggsave("figs_and_tabs/nhanes_fast.png", p1, width = 6.5, height = 4)
 p1
 ```
 
@@ -866,7 +866,7 @@ We plot Agile3+ against the superlearner (90 base models, log-transformed predic
 nhanes_agile3_df = data.frame(Agile3 = nhanes$Agile3, 
            scores_nhanes[,mod_sub_names], 
            Weights = nhanes_weights) %>% 
-  rename("FIB-4" = "FIB4", "Superlearner" = "big_SL_log") %>% 
+  rename("FIB-4" = "FIB4", "Superlearner" = "SL_all") %>% 
   melt(id.vars = c("Agile3", "Weights"), variable.name = "Model", value.name = "Score") 
 
 # Spearman's correlation with Agile3+
@@ -879,12 +879,12 @@ p1 = nhanes_agile3_df %>%
   geom_point(alpha = 0.5) + 
   geom_smooth(method = 'loess', se = FALSE, lwd = 0.5) + 
   geom_label(data = nhanes_agile3_spear, aes(label = round(`NHANES-NAFLD`, 2)), 
-            x = Inf, y = -Inf, vjust = "inward", hjust = "inward", 
+            x = Inf, y = -Inf, vjust = -0.2, hjust = "inward", 
             alpha = 0.8, size = 3) + 
   facet_wrap(~Model, scales = "free_x", ncol = 4) + 
   ylab("Agile3+") + 
   guides(col = "none")
-ggsave("nhanes_agile3.png", p1)
+ggsave("figs_and_tabs/nhanes_agile3.png", p1, width = 6.5, height = 4)
 p1
 ```
 
@@ -895,7 +895,7 @@ We plot Agile4 against the superlearner (90 base models, log-transformed predict
 nhanes_agile4_df = data.frame(Agile4 = nhanes$Agile4, 
            scores_nhanes[,mod_sub_names], 
            Weights = nhanes_weights) %>% 
-  rename("FIB-4" = "FIB4", "Superlearner" = "big_SL_log") %>% 
+  rename("FIB-4" = "FIB4", "Superlearner" = "SL_all") %>% 
   melt(id.vars = c("Agile4", "Weights"), variable.name = "Model", value.name = "Score") 
 
 # Spearman's correlation with Agile4
@@ -908,12 +908,12 @@ p1 = nhanes_agile4_df %>%
   geom_point(alpha = 0.5) + 
   geom_smooth(method = 'loess', se = FALSE, lwd = 0.5) + 
   geom_label(data = nhanes_agile4_spear, aes(label = round(`NHANES-NAFLD`, 2)), 
-            x = Inf, y = -Inf, vjust = "inward", hjust = "inward", 
+            x = Inf, y = -Inf, vjust = -0.2, hjust = "inward", 
             alpha = 0.8, size = 3) + 
   facet_wrap(~Model, scales = "free_x", ncol = 4) + 
   ylab("Agile4") + 
   guides(col = "none")
-ggsave("nhanes_agile4.png", p1)
+ggsave("figs_and_tabs/nhanes_agile4.png", p1, width = 6.5, height = 4)
 p1
 ```
 
@@ -954,8 +954,8 @@ std_flint_df = data.frame(
                        breaks = c(-Inf, quantile(scores_flint$SAFE, 
                                                  c(0.25, 0.5, 0.75)), Inf), 
                        labels = 1:4), 
-  quantiles_SL = cut(scores_flint$big_SL_log,
-                     breaks = c(-Inf, quantile(scores_flint$big_SL_log, 
+  quantiles_SL = cut(scores_flint$SL_all,
+                     breaks = c(-Inf, quantile(scores_flint$SL_all, 
                                                c(0.25, 0.5, 0.75)), Inf), 
                      labels = 1:4))
 
@@ -1018,8 +1018,8 @@ std_nhanes_df = data.frame(
                                                  nhanes_weights, 
                                                  c(0.25, 0.5, 0.75)), Inf), 
                        labels = 1:4), 
-  quantiles_SL = cut(scores_nhanes$big_SL_log,
-                     breaks = c(-Inf, Quantile(scores_nhanes$big_SL_log, 
+  quantiles_SL = cut(scores_nhanes$SL_all,
+                     breaks = c(-Inf, Quantile(scores_nhanes$SL_all, 
                                                nhanes_weights, 
                                                c(0.25, 0.5, 0.75)), Inf), 
                      labels = 1:4), 
@@ -1080,6 +1080,6 @@ p1 = rbind(data.frame(std_flint_plot_df, Cohort = "FLINT"),
                        expand = c(0.015, 0.015)) + 
     xlab("Standardized mean within quartile") + ylab("") + 
     theme(legend.position="bottom")
-ggsave("std_means.png", p1, width = 7, height = 8)
+ggsave("figs_and_tabs/std_means.png", p1, width = 7, height = 8)
 p1
 ```
