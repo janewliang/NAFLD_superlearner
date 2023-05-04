@@ -12,7 +12,7 @@ This repository contains code to reproduce the results presented in the paper
 ## Data
 - Nonalcoholic Steatohepatitis Clinical Research Network Cohort<sup>[1](#myfootnote1)</sup> (**NASH-CRN**; training set)
 - Farnesoid X Receptor (FXR) Ligand Obeticholic Acid in NASH Treatment trial<sup>[2](#myfootnote2)</sup> (**FLINT**; testing set 1)
-- National Health and Nutrition Examination Survey NAFLD Cohort<sup>[3](#myfootnote3)</sup> (**NHANES-NAFLD**; testing set 3)
+- National Health and Nutrition Examination Survey NAFLD Cohort<sup>[3](#myfootnote3)</sup> (**NHANES-NAFLD**; testing set 2)
 
 ---
 
