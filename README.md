@@ -2,7 +2,7 @@
 
 This repository contains code to reproduce the results presented in the paper 
 
-> **Charu V, Liang JW, Mannalithara A, Kwong A, Kim, RW. Novel machine learning approaches to the non-invasive diagnosis of liver fibrosis in NAFLD. 2023.**
+> **Charu V, Liang JW, Mannalithara A, Kwong A, Kim, RW. Ensemble machine learning approaches to the non-invasive diagnosis of liver fibrosis in NAFLD: an illustration of the superlearner algorithm. 2023.**
 
 ## R package dependencies
 - Data wrangling and visualization: [`tidyverse`](https://cran.r-project.org/web/packages/tidyverse/index.html), [`gridExtra`](https://cran.r-project.org/web/packages/gridExtra/index.html), [`gtable`](https://cran.r-project.org/web/packages/gtable/index.html), [`reshape2`](https://cran.r-project.org/web/packages/reshape2/index.html), [`forcats`](https://cran.r-project.org/web/packages/forcats/index.html), and [`cowplot`](https://cran.r-project.org/web/packages/cowplot/index.html)
