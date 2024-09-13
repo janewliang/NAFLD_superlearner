@@ -2,7 +2,7 @@
 
 This repository contains code to reproduce the results presented in the paper 
 
-> **Charu V, Liang JW, Mannalithara A, Kwong A, Tian, Lu, and Kim, RW. Benchmarking clinical risk prediction algorithms with ensemble machine learning: An illustration of the superlearner algorithm for the non-invasive diagnosis of liver fibrosis in non-alcoholic fatty liver disease. 2024.**
+> **Charu V, Liang JW, Mannalithara A, Kwong A, Tian, Lu, and Kim, WR. Benchmarking clinical risk prediction algorithms with ensemble machine learning: An illustration of the superlearner algorithm for the non-invasive diagnosis of liver fibrosis in non-alcoholic fatty liver disease. 2024.**
 
 ## R package dependencies
 - Data wrangling and visualization: [`tidyverse`](https://cran.r-project.org/web/packages/tidyverse/index.html), [`gridExtra`](https://cran.r-project.org/web/packages/gridExtra/index.html), [`gtable`](https://cran.r-project.org/web/packages/gtable/index.html), [`reshape2`](https://cran.r-project.org/web/packages/reshape2/index.html), [`forcats`](https://cran.r-project.org/web/packages/forcats/index.html), and [`cowplot`](https://cran.r-project.org/web/packages/cowplot/index.html)
